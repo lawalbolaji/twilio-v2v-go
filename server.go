@@ -8,6 +8,7 @@ import (
 	"twilio-v2v/groq"
 
 	"github.com/gin-gonic/gin"
+	"github.com/twilio/twilio-go/client"
 	"github.com/twilio/twilio-go/twiml"
 )
 
@@ -20,11 +21,38 @@ func (payload *IVRPayload) Validate() error {
 	return nil
 }
 
+func ValidateTwilioSignature(validator *client.RequestValidator) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		scheme := "http"
+		if ctx.Request.TLS != nil {
+			scheme = "https"
+		}
+
+		url := fmt.Sprintf("%s://%s%s", scheme, ctx.Request.Host, ctx.Request.URL.Path)
+		signature := ctx.Request.Header.Get("X-Twilio-Signature")
+
+		params := make(map[string]string)
+		ctx.Request.ParseForm()
+		for key, value := range ctx.Request.PostForm {
+			params[key] = value[0]
+		}
+
+		if !validator.Validate(url, params, signature) {
+			fmt.Println("This request is not from twilio")
+			ctx.AbortWithStatus(http.StatusForbidden)
+			return
+		}
+
+		ctx.Next()
+	}
+}
+
 func main() {
 	router := gin.Default()
 	groq := groq.NewGroqClient(os.Getenv("GROQ_API_KEY"))
+	twilioReqValidator := client.NewRequestValidator(os.Getenv("TWILIO_AUTH_TOKEN"))
 
-	router.POST("/voice/answer", func(ctx *gin.Context) {
+	router.POST("/voice/answer", ValidateTwilioSignature(&twilioReqValidator), func(ctx *gin.Context) {
 		intro := &twiml.VoiceSay{
 			Message: "hello... you have reached the twilio voice assistant... how can I help you today?",
 		}
@@ -49,7 +77,7 @@ func main() {
 		ctx.String(http.StatusOK, twimlXml)
 	})
 
-	router.POST("/voice/ivr", func(ctx *gin.Context) {
+	router.POST("/voice/ivr", ValidateTwilioSignature(&twilioReqValidator), func(ctx *gin.Context) {
 		var form IVRPayload
 		if err := ctx.ShouldBind(&form); err != nil {
 			ctx.JSON(http.StatusBadRequest, errors.New(err.Error()))
